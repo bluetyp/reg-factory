@@ -1,5 +1,31 @@
 ﻿# 更新日志
 
+## 2026-06-25 — sms-man 接码过 Codex add-phone + 全自动 OAuth 链路（移除订阅模块）
+
+**新增**
+- **`common/sms.py` 接入 sms-man.com（API v2.0）为主用接码平台**：按 pkey 前缀路由（`smsman_<id>` → sms-man，`hero_<id>` → hero-sms，否则 firefox.fun），优先级 **sms-man → firefox.fun → hero-sms**。
+  - **OpenAI 服务自动解析**：`_smsman_resolve_app` 按名称（"openai"）在 `/applications` 子串匹配出 application_id（OpenAI/ChatGPT = **2754**），免硬编码；适配 sms-man 返回 **dict-keyed-by-id** 且字段为 `title`（非 list/name）的实际格式。
+  - **按便宜的排序**：`_smsman_rank_countries` 经 `/get-prices` 价格升序，`_smsman_get_phone` 最便宜国家优先逐个试租。
+  - **账号级错误快速失败**：余额不足 / token 失效返回 `FATAL` 立即中止，不再空刷 170+ 国家。
+  - CLI 辅助：`python -m common.sms applications|countries|balance|prices openai`。
+- **`common/oauth_codex.py` add-phone 全自动接码**：遇 OpenAI add-phone 自动填号 + 接 SMS 验证码过号。
+  - **WhatsApp→SMS 修正**：OpenAI 默认 WhatsApp 投递，`_select_sms_if_present` 在填号前后多语言点选 "Text message" 切到 SMS（sms-man 投 SMS）。
+  - **自动换号重试**：手机号大概率被风控拒，`handle_add_phone` 最多重试 `CODEX_ADDPHONE_ATTEMPTS` 次（默认 8），逐号换租。
+  - **每次尝试先关窗口重登**：`make_reset_page` 工厂在每次授权尝试前 teardown 旧窗口 / 开新窗口 / 重载 cookie / 重登，避免复用窗口导致 OpenAI 风控决策不重新 roll。
+  - **`authorize_with_retry`** 统一编排：`gen_auth_url` 4× 退避重试（SUB2API tiantianai.co 偶发不可达）、`asyncio.wait_for` 硬上限防 `drive_authorize` 卡死、consent 点击用精确 `button[data-dd-action-name="Continue"]` 选择器 + churn-breaker 重 goto。
+- **`register_chatgpt.py` Cloudflare Turnstile 过墙**：`_is_cf_blocked`/`_click_turnstile`/`_switch_cf_node` —— AWS 机房 IP 触发整页 managed challenge（转圈无可点元素）时自动切非 AWS 节点；边界 IP 有可点框时先点。邮箱验证码支持重发兜底（`_click_resend_code`/`_renavigate_resend`，含 zh-TW "重新傳送電郵"）。
+
+**移除**
+- 删除 Codex 订阅（baxigpt）相关：`activate_plus.py`、`common/plus_baxi.py`，及 `config.py`/`.env.example`/README 中 `BAXI_API`/`BAXI_CARDS` 配置与说明。Codex 进 SUB2API/CPA 的正路统一为 `oauth_codex.py`（带真 `refresh_token`）。
+
+**配置**
+- `.env.example` 新增 `SMSMAN_TOKEN` / `SMSMAN_APP_ID_OPENAI`、`CODEX_ADDPHONE_ATTEMPTS=8` / `CODEX_SMS_TIMEOUT=150` / `CODEX_PHONE_SKIP_ATTEMPTS=0`。
+
+**说明**
+- 实测全流程（`run_full_flow --codex`）：邮箱注册 → CF 过墙 → ChatGPT 注册 → 邮件验证码（含重发）→ add-phone（sms-man 接 SMS 过号）→ consent → callback → SUB2API 建号（type=oauth）全链路打通。
+- 实测 8/8 新号均要求 add-phone（手机要求**绑账号非绑会话**），phone-skip 对新号无效，故默认 `CODEX_PHONE_SKIP_ATTEMPTS=0`。
+- sms-man 需 USD 余额 > $13；接码 token 走 `.env`，代码零明文。
+
 ## 2026-06-12 — vision_solver 过 hCaptcha（canvas 点击 + 拖拽）
 
 **新增**

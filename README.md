@@ -109,12 +109,10 @@ cp .env.example .env
 | `OUTLOOK_PROXIES` | Outlook 自注册住宅代理池，`user:pass@host:port`，换行/逗号分隔 | 否 |
 | `MAIL_*` | 备用域名邮箱（一般用不到） | 否 |
 
-**Codex 订阅授权 / 标准 token 上传（按需启用，留空自动跳过）**
+**Codex / 标准 token 上传（按需启用，留空自动跳过）**
 
 | 环境变量 | 说明 | 必填 |
 |---|---|---|
-| `BAXI_API` | Codex/Plus 订阅地址（默认 `https://baxigpt.com/`） | 开通 Plus 时 |
-| `BAXI_CARDS` | 激活码池（`BX-XXXXXXXX`，逗号/换行分隔，可多个） | 开通 Plus 时 |
 | `CLAUDE_SUB_URL` / `GROK_SUB_URL` | Claude / SuperGrok 订阅入口（CDK 激活流程 🔜 敬请期待） | 否 |
 | `CLAUDE_SUB_CDK` / `GROK_SUB_CDK` | Claude / SuperGrok 激活码 CDK 池（预留） | 否 |
 | `CPA_URL` / `CPA_MGMT_KEY` | CPA 管理接口（codex 授权文件导入） | 用 CPA 时 |
@@ -122,7 +120,8 @@ cp .env.example .env
 | `SUB2API_GROUP` | SUB2API 目标分组名（默认 `codex`，需后台先建好） | 否 |
 | `WEBCHAT2API_URL` / `WEBCHAT2API_KEY` | webchat2api（Grok sso 注入） | 用 Grok 时 |
 | `CHATGPT2API_URL` / `CHATGPT2API_KEY` | chatgpt2api 普通网页号导入（`POST /api/accounts`，Bearer admin key） | 用 `--import-c2a` 时 |
-| `SMS_PROJECT_ID_OPENAI` / `HERO_SMS_SERVICE_OPENAI` | ChatGPT add-phone 接码服务号 | 自动接码时 |
+| `SMSMAN_TOKEN` / `SMSMAN_APP_ID_OPENAI` | sms-man.com 接码（Codex add-phone 主用，OpenAI 服务 id=2754） | 用 `--codex` 自动接码时 |
+| `SMS_PROJECT_ID_OPENAI` / `HERO_SMS_SERVICE_OPENAI` | add-phone 回退接码服务号（firefox.fun / hero-sms） | 回退接码时 |
 
 ---
 
@@ -375,50 +374,38 @@ python .\gmail_register_local.py --resume-after-phone --accept-terms
 # 也可以让脚本等待人工手机验证完成后自动继续
 python .\gmail_register_local.py --wait-phone-verification --accept-terms
 ```
-## 5. Codex 订阅授权 & 标准 token 上传
+## 5. Codex OAuth 授权 & 标准 token 上传
 
 注册拿到的是**网页 session**（无 `refresh_token`，下游中转易 401）。这一组流程把账号升级成
 带 `refresh_token` 的正式凭据，并灌到下游中转（SUB2API / CPA）。
 
 **前置条件**
-- 已用 `register_chatgpt.py` 注册过该账号，`cookies/chatgpt/full_*.json` 存在（②靠它重登）。
-- `.env` 配好 `SUB2API_URL/EMAIL/PASSWORD`（②必需），可选 `CPA_URL/CPA_MGMT_KEY`（推 CPA）。
-- 账号最好已是 **Plus**（否则 OAuth 能成，但无 Codex 额度）——没 Plus 先走 ①。
+- 已用 `register_chatgpt.py` 注册过该账号，`cookies/chatgpt/full_*.json` 存在（①靠它重登）。
+- `.env` 配好 `SUB2API_URL/EMAIL/PASSWORD`（①必需），可选 `CPA_URL/CPA_MGMT_KEY`（推 CPA）。
+- `.env` 配好接码：`SMSMAN_TOKEN`（主用，自动过 add-phone），可选 firefox/hero 兜底。
 
 **典型一条龙**
 ```bash
-# 1) 没 Plus 先用激活码开通（已是 Plus 可跳过）
-python activate_plus.py --email a@outlook.com --code BX-XXXXXXXX
+# 注册即授权：邮箱注册 → CF 过墙 → ChatGPT 注册 → add-phone 接码 → OAuth → SUB2API
+python run_full_flow.py --platforms chatgpt --codex
 
-# 2) Codex OAuth 授权 → 同时建到 SUB2API + 推 CPA（带真 refresh_token）
-python oauth_codex.py --manual-phone --keep          # 遇 add-phone 手动填号 + 输 WhatsApp 码
-
-# 3) 可选：批量兜底上传（没走 OAuth 的旧 session，见 ③ 说明）
-python upload_tokens.py chatgpt
+# 或对已注册账号单独跑 OAuth 授权（默认最新 cookie，自动接码过 add-phone）
+python oauth_codex.py --keep
 ```
 
-### ① 用激活码开通 Plus / Codex 订阅（baxigpt.com）
-纯 HTTP，无需浏览器。订阅地址与激活码走环境变量 `BAXI_API` / `BAXI_CARDS`。
-```bash
-python activate_plus.py --email a@outlook.com               # 用激活码池 + 已存 session
-python activate_plus.py --email a@outlook.com --code BX-XXXXXXXX
-python activate_plus.py --at eyJ... --code BX-XXXXXXXX      # 直接给 access_token
-```
-
-### ② Codex OAuth 授权 → SUB2API + CPA（带 refresh_token）
+### ① Codex OAuth 授权 → SUB2API + CPA（带 refresh_token）
 用已存 cookie 重登账号，走 Codex CLI OAuth 换取**带 `refresh_token` 的正式凭据**，同时建到
 SUB2API（type=oauth）并推到 CPA。授权时若遇 OpenAI 的 **add-phone** 手机验证：
-- 默认走接码平台自动过号；
-- `--manual-phone`：**手动模式**，脚本停在输号页，由你在浏览器里自己填号 + 输验证码
-  （**建议用 WhatsApp 可接码的号段**，OpenAI 对普通虚拟号风控严）。
+- 默认走接码平台（**sms-man 主用**）自动接 SMS 过号；OpenAI 默认 WhatsApp 投递，脚本会自动切到 SMS。
+- 手机号大概率被风控拒，脚本自动换号重试（最多 `CODEX_ADDPHONE_ATTEMPTS` 次，默认 8）。
+- `--manual-phone`：**手动模式**，脚本停在输号页，由你在浏览器里自己填号 + 输验证码。
 ```bash
-python oauth_codex.py                            # 默认最新 cookie，自动接码
-python oauth_codex.py --manual-phone --keep      # 手动填号 + 输 WhatsApp 码（推荐先用这个试号）
+python oauth_codex.py                            # 默认最新 cookie，自动接码（sms-man）
+python oauth_codex.py --manual-phone --keep      # 手动填号 + 输码
 python oauth_codex.py --cookie cookies/chatgpt/full_xxx.json --skip-cpa
 ```
-> 🔜 add-phone 全自动接码版本（WhatsApp 接码）后续提供。
 
-### ③ 批量上传本地标准 token
+### ② 批量上传本地标准 token
 注册脚本只把 token 落到 `tokens/`；上传单独触发，幂等（成功的 email 记账跳过）。
 ```bash
 python upload_tokens.py            # all（chatgpt + grok）
@@ -426,10 +413,10 @@ python upload_tokens.py chatgpt    # 只传 ChatGPT（CPA + SUB2API）
 python upload_tokens.py grok       # 只传 Grok（webchat2api）
 ```
 > ⚠️ ChatGPT 这条是 **Path A（兜底）**：从网页 session 上传，**无 `refresh_token`**（CPA 用合成
-> id_token），下游过期不能续期。**Codex 进 SUB2API/CPA 的正路是上面 ② 的 `oauth_codex.py`（带真
+> id_token），下游过期不能续期。**Codex 进 SUB2API/CPA 的正路是上面 ① 的 `oauth_codex.py`（带真
 > `refresh_token`）**；本路径仅供没走 OAuth 的批量兜底。
 
-### ③.5 普通 ChatGPT 网页号 → chatgpt2api
+### ②.5 普通 ChatGPT 网页号 → chatgpt2api
 普通网页号（非 codex/OAuth 三件套）单独走 chatgpt2api（basketikun/chatgpt2api）。注册成功时
 顺手落 `tokens/chatgpt/c2a-*.json`；上传两种方式：
 ```bash
@@ -470,8 +457,7 @@ python export_chatgpt2api.py --json                                # 导出 {acc
 | `register_github.py` | GitHub 注册主流程（单页表单 + Arkose 验证视觉求解 + 邮件 launch code） |
 | `outlook_reg_loop.py` / `register_outlook_standalone.py` | Outlook 自注册养号 |
 | `unlock_outlook.py` / `extract_graph_tokens.py` | Outlook 解锁 / 提取 Graph refresh_token |
-| `activate_plus.py` | baxigpt 激活码开通 Plus / Codex 订阅 |
-| `oauth_codex.py` | Codex OAuth → SUB2API + CPA（带 refresh_token，支持 `--manual-phone`） |
+| `oauth_codex.py` | Codex OAuth → SUB2API + CPA（带 refresh_token，自动接码过 add-phone，支持 `--manual-phone`） |
 | `upload_tokens.py` | 把 `tokens/` 标准 token 上传到 CPA / SUB2API / webchat2api |
 | `export_chatgpt2api.py` | 聚合普通网页号 → chatgpt2api 导入（`--post` 直传 / 导出 txt/json） |
 | `export_accounts.py` | 导出已注册账号 cookie |
@@ -484,9 +470,8 @@ python export_chatgpt2api.py --json                                # 导出 {acc
 | `browser.py` | BitBrowser 连接、stealth、React 受控输入 |
 | `mailbox.py` / `emails.py` | 邮箱取码（Graph/浏览器）、邮箱池管理 |
 | `cookies.py` | 平台 cookie 保存 |
-| `sms.py` | 参数化接码客户端（firefox.fun + hero-sms 兜底） |
+| `sms.py` | 参数化接码客户端（sms-man 主用 + firefox.fun + hero-sms 兜底） |
 | `oauth_codex.py` | Codex OAuth 授权驱动、add-phone 处理、SUB2API 调用 |
-| `plus_baxi.py` | baxigpt 激活码验卡 / 提交 / 轮询 |
 | `session_export.py` | 登录态导出成 CPA / SUB2API 标准 token（对齐 FlowPilot） |
 | `uploaders.py` | 上传到 CPA / SUB2API / webchat2api |
 | `proxy_switch.py` | Clash 节点切换 |
