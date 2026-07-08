@@ -53,6 +53,28 @@ except Exception:
 BITBROWSER_API = os.environ.get("BITBROWSER_API", "http://127.0.0.1:54345")
 
 
+def ensure_clash_proxy_env():
+    """Use .env CLASH_PROXY for direct standalone runs, while local APIs stay direct."""
+    existing = (
+        os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        or ""
+    ).strip()
+    proxy = existing or os.environ.get("CLASH_PROXY", "").strip()
+    if not proxy:
+        return ""
+    if not existing:
+        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = proxy
+        os.environ["http_proxy"] = os.environ["https_proxy"] = proxy
+    no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    parts = [p.strip() for p in no_proxy.split(",") if p.strip()]
+    for item in ("127.0.0.1", "localhost", "::1"):
+        if item not in parts:
+            parts.append(item)
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(parts)
+    return proxy
+
+
 def _fingerprint_provider():
     return (
         os.environ.get("FINGERPRINT_BROWSER")
@@ -509,6 +531,31 @@ GRAPH_REDIRECT_URI = "https://login.microsoftonline.com/common/oauth2/nativeclie
 GRAPH_SCOPE = "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
 
 
+def extract_graph_token_http(email, password, idx=0, attempts=3):
+    """Extract Graph refresh_token through the shared pure-HTTP OAuth flow."""
+    try:
+        from extract_graph_tokens import get_graph_token
+    except Exception as exc:
+        print(f"  [#{idx}] [graph] import error: {exc}")
+        return None
+
+    for attempt in range(attempts):
+        try:
+            res = get_graph_token(email, password, idx)
+        except Exception as exc:
+            print(f"  [#{idx}] [graph] attempt {attempt + 1}/{attempts} error: {exc}")
+            res = None
+        if res and res.get("refresh_token"):
+            return {
+                "refresh_token": res["refresh_token"],
+                "client_id": res.get("client_id") or "",
+            }
+        if attempt < attempts - 1:
+            print(f"  [#{idx}] [graph] no refresh_token, retrying...")
+            time.sleep(3 * (attempt + 1))
+    return None
+
+
 async def extract_graph_token(page, context, email, password, idx=0):
     """Extract Microsoft Graph API refresh_token after registration.
     Uses OAuth2 authorization code flow with a native client (no secret needed).
@@ -619,6 +666,31 @@ async def extract_graph_token(page, context, email, password, idx=0):
 
 # ======================== Outlook Registration ========================
 
+
+def _env_truthy(name, default="0"):
+    return (os.environ.get(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _maybe_confirm_before_register(page, tag, captcha_early_abort=False):
+    """Pause after the signup page opens so the operator can inspect it."""
+    if captcha_early_abort or not _env_truthy("OUTLOOK_CONFIRM_BEFORE_REGISTER"):
+        return
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    print(f"  {tag} signup page opened: {page.url}")
+    if title:
+        print(f"  {tag} page title: {title[:100]}")
+    print("  请在浏览器中确认页面状态；确认无误后回到终端按 Enter 继续。输入 q 后回车可放弃本次。")
+    try:
+        ans = await asyncio.to_thread(input, "  continue? [Enter/q]: ")
+    except EOFError:
+        ans = ""
+    if ans.strip().lower() in {"q", "quit", "abort", "n", "no"}:
+        raise RuntimeError("operator aborted before registration")
+
+
 async def register_outlook(page, context, idx=0, captcha_early_abort=False):
     """
     Register a new Outlook email account.
@@ -636,6 +708,7 @@ async def register_outlook(page, context, idx=0, captcha_early_abort=False):
         await page.goto("https://signup.live.com/signup?lic=1", timeout=60000, wait_until="domcontentloaded")
         await asyncio.sleep(3)
         await page.screenshot(path=f"{SCREENSHOT_DIR}/outlook_{idx}_start.png")
+        await _maybe_confirm_before_register(page, tag, captcha_early_abort)
 
         # Handle privacy/consent pages (Chinese "个人数据导出许可", "同意并继续", etc.)
         for _consent_try in range(5):
@@ -1958,17 +2031,35 @@ async def register_one(bb, idx, proxy_str, results, results_lock, live_fh=None, 
     except Exception as e:
         print(f"  {tag} FATAL: {e}")
 
+    graph = None
+    if email:
+        print(f"  {tag} [graph] extracting refresh_token...")
+        loop = asyncio.get_event_loop()
+        graph = await loop.run_in_executor(
+            None, extract_graph_token_http, email, password, idx
+        )
+
     # ── Save result ───────────────────────────────────────────────
     async with results_lock:
         if email:
-            results.append({
-                "index": idx, "email": email, "password": password,
-                "status": "OK", "proxy": proxy_str, "mode": used_mode,
-            })
-            if live_fh:
-                live_fh.write(f"{email}----{password}\n")
-                live_fh.flush()
-            print(f"  {tag} SUCCESS [{used_mode}]: {email}")
+            if graph and graph.get("refresh_token"):
+                results.append({
+                    "index": idx, "email": email, "password": password,
+                    "status": "OK", "proxy": proxy_str, "mode": used_mode,
+                    "graph": graph,
+                })
+                if live_fh:
+                    live_fh.write(
+                        f"{email}----{password}----{graph['refresh_token']}----{graph.get('client_id', '')}\n"
+                    )
+                    live_fh.flush()
+                print(f"  {tag} SUCCESS [{used_mode} +graph]: {email}")
+            else:
+                results.append({
+                    "index": idx, "email": email, "password": password,
+                    "status": "GRAPH_FAIL", "proxy": proxy_str, "mode": used_mode,
+                })
+                print(f"  {tag} REGISTERED but graph RT missing; not saved: {email}")
         else:
             results.append({
                 "index": idx, "email": None, "password": None,
@@ -1989,11 +2080,18 @@ async def main():
                         help="auto=protocol→headless→browser fallback; or fix to one mode")
     parser.add_argument("--no-verify", action="store_true",
                         help="Do not verify Outlook login before writing successful accounts")
+    parser.add_argument("--confirm-before-register", action="store_true",
+                        help="Pause after the signup page opens; press Enter to start filling")
     args = parser.parse_args()
 
     global REGISTER_TIMEOUT, VERIFY_AFTER_REGISTER
     REGISTER_TIMEOUT = args.timeout
     VERIFY_AFTER_REGISTER = not args.no_verify
+    if args.confirm_before_register:
+        os.environ["OUTLOOK_CONFIRM_BEFORE_REGISTER"] = "1"
+    proxy_env = ensure_clash_proxy_env()
+    if proxy_env:
+        print(f"  proxy env ready: {proxy_env}")
 
     # Load proxies
     proxy_pool = []
@@ -2082,12 +2180,13 @@ async def main():
                 graph = r.get("graph")
                 if graph and graph.get("refresh_token"):
                     graph_count += 1
-                    line += f"----{graph['refresh_token']}"
+                    line += f"----{graph['refresh_token']}----{graph.get('client_id', '')}"
                     all_tokens.append({
                         "email": r['email'],
                         "password": r['password'],
                         "access_token": graph.get('access_token'),
                         "refresh_token": graph.get('refresh_token'),
+                        "client_id": graph.get('client_id'),
                         "expires_in": graph.get('expires_in'),
                     })
                 f.write(line + "\n")
