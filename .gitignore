@@ -45,6 +45,8 @@ proxies_clash.txt
 oauth_authorize_dump.html
 
 # Gmail Android release/offline binary payloads
+gmail_android/.runstate/
+gmail_android/logs/
 gmail_android/offline/bluestacks/*
 !gmail_android/offline/bluestacks/.gitkeep
 gmail_android/dist/
